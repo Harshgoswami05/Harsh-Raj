@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1-beta.0 — 2026-08-14
+
+### Fixes
+
+- Honor `NO_COLOR` and `--no-color` when listing policies (#688)
+
 ## 1.0.0 — 2026-08-12
 
 The first stable release. Everything below this heading shipped across the
