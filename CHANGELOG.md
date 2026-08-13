@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Honor `NO_COLOR` and `--no-color` when listing policies (#688)
+- Honor `NO_COLOR` and `--no-color` when listing policies (#695)
 
 ## 1.0.0 — 2026-08-12
 
