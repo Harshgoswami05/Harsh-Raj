@@ -154,6 +154,13 @@ describe("policies: list (default)", () => {
     expect(result.stdout).not.toMatch(/\x1B\[/);
   });
 
+  it("--no-color works before the subcommand", () => {
+    const result = runCli("--no-color", "policies");
+    assertSuccess(result);
+    expect(result.stdout).toContain("block-sudo");
+    expect(result.stdout).not.toMatch(/\x1B\[/);
+  });
+
   it("rejects unexpected positional argument", () => {
     const result = runCli("policies", "hi");
     assertCleanError(result, "Unexpected argument: hi");
