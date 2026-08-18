@@ -253,6 +253,61 @@ export const ENFORCEMENT_CAPABILITY: Record<
     // the policy-evaluator comment both claim "Goose has NO Stop event"; that is
     // false at v1.43.0 (agent.rs:1956, :2840 emit_stop_hook_blocking).
   },
+
+  // grok 1.0.3 (1a29d5bc12). Every "block" row below was proven by a live
+  // probe, not read from grok's hooks doc — which is also where two of the
+  // three surprises came from (see types.ts): the doc's own tool name for the
+  // shell tool disagrees with the wire, and nothing documents that project
+  // hooks need a git repo. grok's capability advertisement corroborates the
+  // blocking set: its ACP initialize response carries
+  //   x.ai/hooks: {blockingEvents:["pre_tool_use","stop","subagent_stop"],
+  //                decisions:["deny","block"], stopSignals:[…]}
+  // — exactly the three rows marked "block" here.
+  grok: {
+    PreToolUse: "block",           // VERIFIED live: {decision:"deny",reason} blocked `echo` and beat --yolo (permissionMode bypassPermissions); Claude's hookSpecificOutput shape did NOT block (A/B on the same hook)
+    Stop: "block",                 // VERIFIED live: {decision:"block",reason} forced another turn — the agent ran the required command, then stopped. ONLY on reason==="end_turn"; the session-shutdown fire is parsed and discarded upstream. Cap: 8 continuations/turn
+    SubagentStop: "block",         // advertised in x.ai/hooks blockingEvents; not exercised by a probe
+    UserPromptSubmit: "observe",   // fired live; not in blockingEvents
+    PostToolUse: "observe",        // fired live; post-hoc, and not in blockingEvents
+    PostToolUseFailure: "observe",
+    SessionStart: "observe",       // fired live
+    SessionEnd: "observe",         // fired live
+    // The six below are the widened set. All OBSERVE by construction, not by
+    // caution: blockingEvents lists exactly three events, so grok cannot honour
+    // a deny on any of these no matter what we send.
+    StopFailure: "observe",        // VERIFIED firing (a 429 turn): {error:"rate_limit", errorDetails, lastAssistantMessage}
+    Notification: "observe",       // VERIFIED firing: notificationType "agent_error" — a type grok's own docs do not list
+    PermissionDenied: "observe",   // config key accepted (count=14); firing not exercised — needs a real permission denial
+    SubagentStart: "observe",      // config key accepted; firing not exercised — needs a subagent
+    PreCompact: "observe",         // config key accepted; firing not exercised — needs compaction
+    PostCompact: "observe",        // config key accepted; firing not exercised — needs compaction
+  },
+
+  // qwen-code 0.21.12. A near-pure Claude clone on the wire, so most rows
+  // inherit Claude's semantics — but only the two proven ones are "block".
+  qwen: {
+    PreToolUse: "block",           // VERIFIED live: hookSpecificOutput.permissionDecision:"deny" blocked run_shell_command and beat -y (yolo); reason reached the model verbatim. ("ask" degrades to deny in headless and background subagents)
+    Stop: "block",                 // VERIFIED live: top-level {decision:"block",reason} forced another turn. NOTE stop_hook_active is true on the FIRST fire, so it is not a usable loop guard here
+    UserPromptSubmit: "observe",   // docs accept a decision, unverified — and it fires per MODEL INVOCATION (4× in one observed turn), so treat as observation until probed
+    PostToolUse: "observe",        // docs accept `decision`, unverified; post-hoc regardless
+    PostToolUseFailure: "observe",
+    PermissionRequest: "observe",
+    PermissionDenied: "observe",
+    SubagentStart: "observe",
+    SubagentStop: "observe",       // sibling of Stop upstream, but not probed — left honest rather than assumed
+    PreCompact: "observe",
+    SessionStart: "observe",       // fired live
+    SessionEnd: "observe",
+    // Widened set. Every one has a real executeHooks() dispatch site in the
+    // shipped bundle; the three marked VERIFIED were also observed firing.
+    TaskCreated: "block",          // qwen's TodoCreated. VERIFIED firing ×4 with phase:"validation", where upstream docs state a {decision:"block"} PREVENTS the write and returns the reason to the model
+    TaskCompleted: "block",        // qwen's TodoCompleted. VERIFIED firing ×4, same validation-phase contract
+    InstructionsLoaded: "observe", // VERIFIED firing: {file_path, memory_type, load_reason}
+    Notification: "observe",       // VERIFIED firing: notification_type "auth_success"
+    StopFailure: "observe",        // upstream documents it fire-and-forget — output and exit code ignored
+    PostCompact: "observe",
+    UserPromptExpansion: "observe",
+  },
 };
 
 /**

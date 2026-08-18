@@ -49,6 +49,19 @@ let lastSubcommand = null;
 // with the right event name. Mirrors the cli_install_failure / cli_uninstall_failure
 // pattern below for parity. Cleared back to null after the success track.
 let lastPolicyAction = null;
+/**
+ * Every CLI `policies --install/--uninstall/list --cli` accepts.
+ *
+ * ONE list, referenced from all three flag parsers below. It used to be three
+ * hardcoded copies, and they drifted: grok and qwen were added to the `--hook
+ * --cli` validation and to INTEGRATION_TYPES, but not here, so a real
+ * `policies --install --cli grok` was rejected outright while every unit test
+ * passed. __tests__/hooks/integrations.test.ts asserts this equals
+ * INTEGRATION_TYPES so the next CLI cannot repeat it.
+ */
+const INSTALLABLE_CLIS = ["claude", "codex", "copilot", "cursor", "opencode", "pi", "hermes", "openclaw", "factory", "devin", "antigravity", "goose", "grok", "qwen"];
+const VALID_CLIS_USAGE = `Missing value(s) for --cli. Usage: --cli ${INSTALLABLE_CLIS.join(" ")} (or any subset)`;
+
 async function track(name, props) {
   try {
     if (!_telemetry) {
@@ -94,7 +107,7 @@ const hookIdx = args.indexOf("--hook");
 if (hookIdx >= 0) {
   if (!args[hookIdx + 1]) {
     console.error("Error: Missing event type after --hook");
-    console.error("Usage: failproofai --hook <event> [--cli <claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose>]");
+    console.error("Usage: failproofai --hook <event> [--cli <claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose|grok|qwen>]");
     process.exit(1);
   }
   const eventType = args[hookIdx + 1];
@@ -116,6 +129,8 @@ if (hookIdx >= 0) {
       || cliArg === "devin"
       || cliArg === "antigravity"
       || cliArg === "goose"
+      || cliArg === "grok"
+      || cliArg === "qwen"
     )
       ? cliArg
       : "claude";
@@ -300,9 +315,9 @@ COMMANDS
   policies, p                    List all available policies and their status
   policies --install, -i         Enable policies in agent CLI settings
     [names...]                     Specific policy names to enable
-    --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose
+    --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose|grok|qwen
                                    Agent CLI(s) to install for; space-separated
-                                   (e.g. --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose) or repeated.
+                                   (e.g. --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose grok qwen) or repeated.
                                    Default: detect installed CLIs and prompt.
     --scope user|project|local     Config scope to write to (default: user)
                                    (Codex / Copilot / Cursor / OpenCode / Pi support user|project only)
@@ -311,7 +326,7 @@ COMMANDS
 
   policies --uninstall, -u       Disable policies or remove hooks
     [names...]                     Specific policy names to disable
-    --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose
+    --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose|grok|qwen
                                    Agent CLI(s) to uninstall from
     --scope user|project|local|all Config scope to remove from (default: user)
     --beta                         Remove only beta policies
@@ -390,7 +405,7 @@ EXAMPLES
   failproofai policies --install --cli pi --scope project
   failproofai policies --install --cli factory --scope project
   failproofai policies --install --cli devin --scope project
-  failproofai policies --install --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose
+  failproofai policies --install --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose grok qwen
   failproofai policies --install --custom ./my-policies.js
   failproofai policies -i -c ./my-policies.js
   failproofai policies --uninstall block-sudo
@@ -1134,9 +1149,9 @@ USAGE
 
 OPTIONS (install)
   [names...]                     Specific policy names to enable (omit for interactive)
-  --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose
+  --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose|grok|qwen
                                  Agent CLI(s) to install for; space-separated
-                                 (e.g. --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose) or repeated.
+                                 (e.g. --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose grok qwen) or repeated.
                                  Omit to detect installed CLIs and prompt (or
                                  auto-pick if only one is found).
   --scope user|project|local     Config scope to write to (default: user)
@@ -1147,7 +1162,7 @@ OPTIONS (install)
 
 OPTIONS (uninstall)
   [names...]                     Specific policy names to disable (omit to remove hooks)
-  --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose
+  --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose|grok|qwen
                                  Agent CLI(s) to uninstall from
   --scope user|project|local|all Config scope to remove from (default: user)
   --beta                         Remove only beta policies
@@ -1164,7 +1179,7 @@ EXAMPLES
   failproofai policies --install --cli pi --scope project
   failproofai policies --install --cli factory --scope project
   failproofai policies --install --cli devin --scope project
-  failproofai policies --install --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose
+  failproofai policies --install --cli claude codex copilot cursor opencode pi hermes openclaw factory devin antigravity goose grok qwen
   failproofai policies --install --custom ./my-policies.js
   failproofai policies --install --custom ./security.js --custom ./workflow.js
   failproofai policies -i -c ./my-policies.js
@@ -1206,7 +1221,7 @@ EXAMPLES
       //   --cli claude codex copilot
       //   --cli claude --cli codex
       // Values are consumed greedily until the next flag or end of argv.
-      const VALID_CLIS = new Set(["claude", "codex", "copilot", "cursor", "opencode", "pi", "hermes", "openclaw", "factory", "devin", "antigravity", "goose"]);
+      const VALID_CLIS = new Set(INSTALLABLE_CLIS);
       const cliFlagValues = [];
       const cliConsumedIdxs = new Set();
       const cliFlagIdxs = subArgs.map((a, i) => (a === "--cli" ? i : -1)).filter((i) => i >= 0);
@@ -1223,7 +1238,7 @@ EXAMPLES
           consumed++;
         }
         if (consumed === 0) {
-          throw new CliError("Missing value(s) for --cli. Usage: --cli claude codex copilot cursor opencode pi hermes openclaw (or any subset)");
+          throw new CliError(VALID_CLIS_USAGE);
         }
       }
 
@@ -1295,7 +1310,7 @@ EXAMPLES
       }
 
       // --cli accepts one or more space-separated values; same parser as install.
-      const VALID_CLIS = new Set(["claude", "codex", "copilot", "cursor", "opencode", "pi", "hermes", "openclaw", "factory", "devin", "antigravity", "goose"]);
+      const VALID_CLIS = new Set(INSTALLABLE_CLIS);
       const cliFlagValues = [];
       const cliConsumedIdxs = new Set();
       const cliFlagIdxs = subArgs.map((a, i) => (a === "--cli" ? i : -1)).filter((i) => i >= 0);
@@ -1312,7 +1327,7 @@ EXAMPLES
           consumed++;
         }
         if (consumed === 0) {
-          throw new CliError("Missing value(s) for --cli. Usage: --cli claude codex copilot cursor opencode pi hermes openclaw (or any subset)");
+          throw new CliError(VALID_CLIS_USAGE);
         }
       }
 
@@ -1408,7 +1423,7 @@ USAGE
   failproofai policy remove <name>   Disable one policy
 
 OPTIONS
-  --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose
+  --cli claude|codex|copilot|cursor|opencode|pi|hermes|openclaw|factory|devin|antigravity|goose|grok|qwen
                                      Agent CLI(s) to apply to; space-separated or repeated.
                                      Omit to detect installed CLIs and prompt.
   --scope user|project|local         Config scope (default: user)
@@ -1446,7 +1461,7 @@ EXAMPLES
     }
 
     // --cli accepts one or more space-separated values, optionally repeated.
-    const VALID_CLIS = new Set(["claude", "codex", "copilot", "cursor", "opencode", "pi", "hermes", "openclaw", "factory", "devin", "antigravity", "goose"]);
+    const VALID_CLIS = new Set(INSTALLABLE_CLIS);
     const cliFlagValues = [];
     const cliConsumedIdxs = new Set();
     const cliFlagIdxs = rest.map((a, i) => (a === "--cli" ? i : -1)).filter((i) => i >= 0);
@@ -1461,7 +1476,7 @@ EXAMPLES
         consumed++;
       }
       if (consumed === 0) {
-        throw new CliError("Missing value(s) for --cli. Usage: --cli claude codex copilot cursor opencode pi hermes openclaw (or any subset)");
+        throw new CliError(VALID_CLIS_USAGE);
       }
     }
 

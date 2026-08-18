@@ -5,7 +5,7 @@
 export const HOOK_SCOPES = ["user", "project", "local"] as const;
 export type HookScope = (typeof HOOK_SCOPES)[number];
 
-export const INTEGRATION_TYPES = ["claude", "codex", "copilot", "cursor", "opencode", "pi", "hermes", "openclaw", "factory", "devin", "antigravity", "goose"] as const;
+export const INTEGRATION_TYPES = ["claude", "codex", "copilot", "cursor", "opencode", "pi", "hermes", "openclaw", "factory", "devin", "antigravity", "goose", "grok", "qwen"] as const;
 export type IntegrationType = (typeof INTEGRATION_TYPES)[number];
 
 export const CODEX_HOOK_SCOPES = ["user", "project"] as const;
@@ -983,6 +983,289 @@ export const GOOSE_TOOL_INPUT_MAP: Record<string, Record<string, string>> = {
   Write: { path: "file_path" },
   Edit: { path: "file_path" },
   LS: { path: "file_path" },
+};
+
+// ---------------------------------------------------------------------------
+// grok (xAI's `grok` CLI) — 13th integration. Dual-pillar (live hooks + audit),
+// user + project scope, Claude/Codex-style external shell hooks. The entire
+// contract below was VERIFIED LIVE against grok 1.0.3 (1a29d5bc12) with a
+// recorder hook on all 14 events plus deny / stop-gate probes.
+//
+//   1. **The envelope is camelCase**, so — like Antigravity — normalizeCliPayload
+//      has a `grok` branch. `toolName`/`toolInput`/`sessionId`/`transcriptPath`
+//      → snake_case, `workspaceRoot` → `cwd`, `toolResult` → `tool_response`
+//      (grok does NOT use Claude's `tool_response`), `stopHookActive` →
+//      `stop_hook_active`. NOTE `hookEventName`'s *value* is snake_case
+//      ("pre_tool_use") while the `--hook` arg is PascalCase, so the arg is the
+//      canonical source and there is NO GROK_EVENT_MAP.
+//
+//   2. **Deny = `{"decision":"deny","reason"}` on stdout at exit 0.** VERIFIED
+//      live, and it beat `--yolo` (permissionMode `bypassPermissions`). grok
+//      does NOT read Claude's `hookSpecificOutput.permissionDecision` shape —
+//      also verified live, by A/B: the identical hook emitting Claude's shape
+//      let `echo` run, emitting grok's shape blocked it. This is why
+//      isGrokEnvelope() exists (see normalize-cli-payload.ts).
+//
+//   3. **Stop fires TWICE per session** — once per real turn end
+//      (`reason: "end_turn"`) and once at shutdown (`reason: "shutdown"`),
+//      whose decision grok parses and then IGNORES (no turn is left to
+//      continue). So the Stop branch in policy-evaluator.ts gates on
+//      `reason === "end_turn"`; blocking on the shutdown fire would emit a deny
+//      that is counted as enforcement and can never be acted on. Captured
+//      sequence, one turn: end_turn/stopHookActive=false (we blocked) → the
+//      agent ran the required command → end_turn/stopHookActive=true (allowed)
+//      → shutdown. Cap: 8 continuations per turn, then grok forces the stop.
+//
+//   4. **Project hooks require a GIT REPO** — undocumented, verified live: in a
+//      *trusted* non-git directory holding a valid `.grok/hooks/*.json`, grok
+//      logs `project_sources=0` and the hook never fires; after `git init` in
+//      the same directory it logs `project_sources=4` and fires. A project-scope
+//      install into a non-git dir is a silent no-op, so the installer warns.
+//      Project scope additionally requires folder trust (`--trust` /
+//      `/hooks-trust`); user scope (`~/.grok/hooks/`) is always trusted.
+//
+// Settings paths (VERIFIED):
+//   user    → ~/.grok/hooks/failproofai.json      (always trusted)
+//   project → <repo>/.grok/hooks/failproofai.json (needs git + folder trust)
+//
+// `timeout` is in SECONDS (grok's default is 5; 600 for Stop/SubagentStop).
+// Env injected on every hook: GROK_HOOK_EVENT, GROK_HOOK_NAME, GROK_SESSION_ID,
+// GROK_WORKSPACE_ROOT, and CLAUDE_PROJECT_DIR (a Claude-compatible alias) — so
+// the dogfood config can use $CLAUDE_PROJECT_DIR like .claude/settings.json.
+//
+// Audit pillar: `~/.grok/sessions/<percent-encoded-cwd>/<sessionId>/` —
+// PERCENT encoding (`%2Fhome%2Fyou%2Frepo`), not Claude's dash style. Each
+// session dir holds chat_history.jsonl + events.jsonl + summary.json (the last
+// carries `info.cwd`, `session_summary`, `num_messages`, `current_model_id`).
+// See lib/grok-sessions.ts. `GROK_HOME` overrides the home dir for tests.
+export const GROK_HOOK_SCOPES = ["user", "project"] as const;
+export type GrokHookScope = (typeof GROK_HOOK_SCOPES)[number];
+
+// All 14 of grok's events, which is its entire surface. Every name here was
+// accepted by a live grok 1.0.3 (`hooks: loaded from global source … count=14`,
+// `loaded hooks hook_count=14`, no unknown-key warning) — grok silently SKIPS
+// unrecognized event keys, so acceptance is the thing to verify, and it was.
+// `Notification` and `StopFailure` were additionally observed firing.
+//
+// The six beyond the original eight are all OBSERVATION — grok's own ACP
+// handshake advertises `blockingEvents: ["pre_tool_use","stop","subagent_stop"]`
+// and that is the complete list, so nothing added here can ever deny. They are
+// installed for custom-policy surface and audit signal, and because the cost of
+// an event that never fires is zero.
+export const GROK_HOOK_EVENT_TYPES = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PermissionDenied",
+  "Stop",
+  "StopFailure",
+  "Notification",
+  "SubagentStart",
+  "SubagentStop",
+  "PreCompact",
+  "PostCompact",
+  "SessionEnd",
+] as const;
+export type GrokHookEventType = (typeof GROK_HOOK_EVENT_TYPES)[number];
+
+/**
+ * grok's tool ids → Claude PascalCase canonical names so existing builtins
+ * (which match `toolName === "Bash"`) fire unchanged. Every entry below was
+ * observed on the wire, not read from a doc — which matters here, because
+ * grok's own docs disagree with themselves: the hooks doc calls the shell tool
+ * `run_terminal_command` and the headless doc calls it `run_terminal_cmd`. The
+ * wire says `run_terminal_command`; the alias is kept so a matcher written
+ * against either name still canonicalizes. Unknown tools pass through via the
+ * `?? raw` fallback in handler.ts:canonicalizeToolName.
+ */
+export const GROK_TOOL_MAP: Record<string, string> = {
+  run_terminal_command: "Bash",
+  run_terminal_cmd: "Bash",
+  write: "Write",
+  read_file: "Read",
+  search_replace: "Edit",
+  grep: "Grep",
+  list_dir: "LS",
+  web_search: "WebSearch",
+  web_fetch: "WebFetch",
+  spawn_subagent: "Task",
+};
+
+/**
+ * Per-tool input-key translation, keyed by the *canonical* tool name. Only two
+ * of grok's tools deviate, and both were found by capture rather than by
+ * reading: `read_file` delivers the path as `target_file` and `list_dir` as
+ * `target_directory`. The `read_file` entry is the load-bearing one — without
+ * it a live `.env` read sails past block-env-files / block-read-outside-cwd,
+ * the exact bug COPILOT_TOOL_INPUT_MAP was added to fix. Everything else is
+ * already canonical: Bash `command`, Write `file_path`/`content`, Edit
+ * `file_path`/`old_string`/`new_string`, Grep `pattern`/`path`.
+ */
+export const GROK_TOOL_INPUT_MAP: Record<string, Record<string, string>> = {
+  Read: { target_file: "file_path" },
+  LS: { target_directory: "path" },
+};
+
+// ---------------------------------------------------------------------------
+// qwen (Alibaba's Qwen Code, `qwen`) — 14th integration. Dual-pillar, user +
+// project scope. The CHEAPEST integration in the codebase: qwen is a near-pure
+// Claude clone on the wire, so it needs NO event map, NO payload normalization,
+// and NO tool-input map. Verified live against @qwen-code/qwen-code 0.21.12.
+//
+//   1. **Payload is pure Claude snake_case** — `hook_event_name` (PascalCase
+//      *value*, unlike grok), `session_id`, `transcript_path`, `cwd`,
+//      `permission_mode`, `tool_name`, `tool_input`, `tool_response`,
+//      `stop_hook_active`. Nothing to normalize.
+//
+//   2. **Deny = `hookSpecificOutput.permissionDecision`** ("allow" | "deny" |
+//      "ask"), which is Claude's own PreToolUse shape — so the generic Claude
+//      branch in policy-evaluator.ts already emits the right thing and qwen
+//      needs no PreToolUse special-case. VERIFIED live: it beat `-y` (yolo) and
+//      the reason reached the model verbatim. ("ask" degrades to deny in
+//      headless and in background subagents.) Stop takes the top-level
+//      `{decision:"block",reason}` shape instead, which is why the qwen branch
+//      below exists at all.
+//
+//   3. **`stop_hook_active` is TRUE on the FIRST Stop fire**, before anything
+//      has blocked — verified live. It is therefore NOT a usable "already
+//      retrying" signal on qwen, and no failproofai loop guard may depend on
+//      it. (Unlike grok, qwen fires no session-end Stop: both fires are real.)
+//
+//   4. **`UserPromptSubmit` fires per MODEL INVOCATION, not per user prompt** —
+//      one user turn produced FOUR of them (initial query + one per tool-result
+//      continuation). qwen's own docs confirm it covers UserQuery/ToolResult/
+//      Hook sends and warn that `prompt` is not necessarily user input. Any
+//      UserPromptSubmit policy fires N× per turn here; `submitted_prompt` is
+//      present only for interactive-TUI submissions (absent in headless, ACP,
+//      serve, SDK).
+//
+// Settings paths (VERIFIED): the `hooks` key inside qwen's normal settings.
+//   user    → ~/.qwen/settings.json
+//   project → <cwd>/.qwen/settings.json
+//
+// `timeout` is in MILLISECONDS (default 60000) — qwen is the ONLY integration
+// that is not seconds-based, so buildHookEntry must not be "simplified" to
+// share the others' value. `disableAllHooks: true` (top level) and `--safe-mode`
+// both disable every hook.
+//
+// Audit pillar: `~/.qwen/projects/<dash-encoded-cwd>/chats/<sessionId>.jsonl` —
+// Claude-style encoded-cwd folders, one JSONL per session, lines carrying
+// `{sessionId, timestamp, type: user|assistant|system|tool_result, cwd}`. A real
+// cwd per line means audit groups by project like Claude/Devin/Goose. See
+// lib/qwen-sessions.ts. `QWEN_HOME` overrides the home dir for tests.
+export const QWEN_HOOK_SCOPES = ["user", "project"] as const;
+export type QwenHookScope = (typeof QWEN_HOOK_SCOPES)[number];
+
+// Every event below has a real `executeHooks("<Event>")` dispatch site in the
+// shipped qwen bundle (verified by reading it, not the docs — which is also how
+// `InstructionsLoaded`, `UserPromptExpansion` and `PostToolBatch` turned up:
+// all three are dispatched but absent from qwen's documented event table).
+// TodoCreated/TodoCompleted/PostToolBatch/InstructionsLoaded/Notification were
+// additionally observed firing in a live 0.21.12 session.
+//
+// Deliberately NOT subscribed:
+//   • `MessageDisplay` — fires per streaming chunk, i.e. a hook process per
+//     chunk. The one entry here that could make hooks feel slow.
+//   • `PostToolBatch` — fired 6× in the same task PostToolUse fired 5×, and
+//     carries the same tool calls in batch form. Measured at +76% hook
+//     invocations for a task, against no builtin that reads it. One line to add
+//     later if a custom policy ever wants batch granularity.
+//   • `SessionDelete` — no canonical equivalent, and little to enforce on.
+export const QWEN_HOOK_EVENT_TYPES = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PermissionRequest",
+  "PermissionDenied",
+  "Stop",
+  "StopFailure",
+  "SubagentStart",
+  "SubagentStop",
+  "PreCompact",
+  "PostCompact",
+  "Notification",
+  "InstructionsLoaded",
+  "UserPromptExpansion",
+  "TodoCreated",
+  "TodoCompleted",
+  "SessionEnd",
+] as const;
+export type QwenHookEventType = (typeof QWEN_HOOK_EVENT_TYPES)[number];
+
+/**
+ * qwen event name → canonical HookEventType.
+ *
+ * Seventeen of nineteen are already canonical and map to themselves; this map
+ * exists for the two that are not. qwen calls its task list "todos", so
+ * `TodoCreated`/`TodoCompleted` are the same concept failproofai and Claude
+ * call `TaskCreated`/`TaskCompleted`, and mapping them lets a policy written
+ * once fire on both.
+ *
+ * These two are also the only ADDED events on either CLI that can actually
+ * block. qwen runs todo hooks in two phases and the payload says which:
+ * during `phase: "validation"` a `{decision:"block"|"deny", reason}` prevents
+ * the write and the reason goes back to the model; during `phase: "postWrite"`
+ * the todo is already persisted and a block is ignored. Both phases were
+ * observed live (`phase: "validation"` on every capture).
+ *
+ * Exhaustive `Record<QwenHookEventType, HookEventType>` so tsc fails the build
+ * if an event is added here without deciding what it canonicalizes to.
+ */
+export const QWEN_EVENT_MAP: Record<QwenHookEventType, HookEventType> = {
+  SessionStart: "SessionStart",
+  UserPromptSubmit: "UserPromptSubmit",
+  PreToolUse: "PreToolUse",
+  PostToolUse: "PostToolUse",
+  PostToolUseFailure: "PostToolUseFailure",
+  PermissionRequest: "PermissionRequest",
+  PermissionDenied: "PermissionDenied",
+  Stop: "Stop",
+  StopFailure: "StopFailure",
+  SubagentStart: "SubagentStart",
+  SubagentStop: "SubagentStop",
+  PreCompact: "PreCompact",
+  PostCompact: "PostCompact",
+  Notification: "Notification",
+  InstructionsLoaded: "InstructionsLoaded",
+  UserPromptExpansion: "UserPromptExpansion",
+  TodoCreated: "TaskCreated",
+  TodoCompleted: "TaskCompleted",
+  SessionEnd: "SessionEnd",
+};
+
+/**
+ * qwen's runtime tool ids → Claude PascalCase canonical names. All six were
+ * observed live. qwen also accepts its own display names (`WriteFile`,
+ * `ReadFile`) as matcher aliases, so those are mapped too for configs written
+ * against the older names. Unknown tools pass through via the `?? raw`
+ * fallback.
+ *
+ * There is deliberately NO QWEN_TOOL_INPUT_MAP: every tool already delivers
+ * canonical keys — `run_shell_command` `{command}`, `read_file` `{file_path}`,
+ * `write_file` `{file_path, content}`, `edit` `{file_path, old_string,
+ * new_string}`, `grep_search` `{pattern, path}`, `list_directory` `{path}`.
+ */
+export const QWEN_TOOL_MAP: Record<string, string> = {
+  run_shell_command: "Bash",
+  read_file: "Read",
+  ReadFile: "Read",
+  read_many_files: "Read",
+  write_file: "Write",
+  WriteFile: "Write",
+  edit: "Edit",
+  replace: "Edit",
+  grep_search: "Grep",
+  search_file_content: "Grep",
+  glob: "Glob",
+  list_directory: "LS",
+  web_fetch: "WebFetch",
+  google_web_search: "WebSearch",
+  task: "Task",
+  todo_write: "TodoWrite",
 };
 
 export const HOOK_EVENT_TYPES = [
