@@ -77,6 +77,9 @@ packages/*/assets/
 # closed-source platform (cloned separately)
 /platform
 
+# FailproofAI Cloud reference source (cloned separately for docs research)
+/agenteye
+
 # rust
 /target
 
@@ -132,3 +135,6 @@ COMMIT_MSG.tmp
 **/.failproofai/bin/
 **/.failproofai/run/
 **/.failproofai/state/
+
+# blog drafts (local, not for commit yet)
+/blog/
