@@ -1208,7 +1208,46 @@ crates/failproofaid/           The daemon binary — socket server + service lif
                               @failproofai/failproofaid-<os>-<arch> npm packages and as
                               GitHub Release assets — see "How the daemon binary reaches
                               users")
-__tests__/                   Unit + e2e tests (vitest)
+fp-cli/                      The `fp` CLI for FailproofAI Cloud (Python, uv, pytest).
+                              PyPI dist `fp-cli`; the installed command is `fp` —
+                              they differ because `fp` was taken on PyPI. Talks only
+                              to the Cloud dashboard's /api surface, never to the
+                              Rust server directly. NOT the same thing as the
+                              `failproofai` CLI this repo builds from bin/ + src/:
+                              that one enforces inside the agent loop, this one
+                              reads back what the loop did.
+  fp_cli/client.py            Pure query layer (no printing, no Typer) — the surface
+                              an MCP server would wrap
+  fp_cli/output.py            All rendering, incl. `_TOP_LEVEL_GROUPS`, the
+                              HAND-MAINTAINED top-level help table. A command missing
+                              from it is invisible in `fp help` forever; guarded by
+                              tests/test_help_table_coverage.py
+sdk/python/                  The telemetry SDK (Python, uv, pytest). PyPI dist
+                              `failproofai-sdk`, imported as `failproofai_sdk`. The
+                              OTHER end of the pipe from fp-cli: this one is called
+                              BY the user's agent to record what it did, while fp-cli
+                              reads that back. Zero runtime dependencies, by policy —
+                              it installs into other people's agent processes, so any
+                              dependency we declare is a constraint they inherit.
+                              `sdk/` is a directory because more languages go beside
+                              `python/`, not inside it.
+  failproofai_sdk/_events.py  The 15 public event methods, and the `_pending` map that
+                              auto-computes duration_ms by pairing start/end events
+  failproofai_sdk/_schema.py  One dataclass per event type; `to_dict()` IS the wire
+                              format. Frozen byte-for-byte by tests/test_wire_format.py
+  failproofai_sdk/_writer.py  Background flush thread; publishes batches by writing
+                              `.tmp` and atomically renaming to `.jsonl`. Importing the
+                              package starts that thread — a documented side effect
+  failproofai_sdk/_resolver.py
+                              Where the spool lives. Mirrors customAgentsDir() in
+                              src/hooks/fp-home.ts and custom_agents_events_dir() in
+                              crates/fpai-collect/src/config.rs; all three must agree
+                              or the SDK writes where no daemon reads, with NO error
+                              on either side. tests/test_spool_contract.py checks the
+                              Rust and the TypeScript directly and never skips
+__tests__/                   Unit + e2e tests (vitest) — TypeScript only; the Python
+                              components' tests live in fp-cli/tests/ and
+                              sdk/python/tests/ and run under pytest
 examples/                    Sample custom policy files
 ```
 

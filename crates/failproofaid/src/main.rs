@@ -14,11 +14,70 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+const USAGE: &str = "\
+failproofaid — the failproofai background daemon
+
+Usage: failproofaid [options]
+
+Options:
+  -h, --help       Print this help and exit.
+  -v, --version    Print the version and exit.
+
+Takes no positional arguments. With no options it runs in the foreground; the
+installed service unit is what supervises it in normal use. Configuration is
+read from ~/.failproofai (override with FAILPROOFAI_HOME).
+";
+
+/// What the command line asked for.
+///
+/// Extracted from `main` so the fall-through below is testable. It is the whole
+/// point of this enum: an unrecognised option used to reach `run()`, which takes
+/// the singleton lock and binds two sockets, so `failproofaid --help` started a
+/// daemon and printed nothing. In a terminal that reads as a hang; in a script it
+/// blocks forever.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    Run,
+    Version,
+    Help,
+    /// An option this binary does not accept. Carries it so the error can name it.
+    Unknown(String),
+}
+
+fn parse_args(args: &[String]) -> Invocation {
+    // --help and --version win over an unknown option that follows them, matching
+    // what every other CLI does: `--help --nonsense` prints help.
+    for a in args.iter().skip(1) {
+        if a == "--help" || a == "-h" {
+            return Invocation::Help;
+        }
+        if a == "--version" || a == "-v" {
+            return Invocation::Version;
+        }
+    }
+    match args.iter().skip(1).find(|a| a.starts_with('-')) {
+        Some(bad) => Invocation::Unknown(bad.clone()),
+        None => Invocation::Run,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("failproofaid {}", env!("CARGO_PKG_VERSION"));
-        return;
+    match parse_args(&args) {
+        Invocation::Version => {
+            println!("failproofaid {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Invocation::Help => {
+            print!("{USAGE}");
+            return;
+        }
+        Invocation::Unknown(bad) => {
+            eprintln!("[failproofaid] unrecognised option: {bad}");
+            eprint!("{USAGE}");
+            std::process::exit(2);
+        }
+        Invocation::Run => {}
     }
 
     if let Err(err) = run() {
@@ -734,6 +793,9 @@ fn collector_tasks() -> Vec<fpai_collect::TaskSpec> {
     // One `Delivery` shared by both tasks, so they share an upload semaphore
     // and an in-flight set. Separate ones would let the watcher and a
     // concurrent sweep POST the same batch twice.
+    // Grabbed before the uploader moves into `Delivery`. The counters live on
+    // the `Uploader` itself so a supervised task restart never rewinds them.
+    let upload_metrics = uploader.metrics();
     let delivery = std::sync::Arc::new(fpai_collect::Delivery::new(uploader));
 
     let watch_delivery = delivery.clone();
@@ -750,6 +812,12 @@ fn collector_tasks() -> Vec<fpai_collect::TaskSpec> {
     // daemon", where a stale file makes a stopped daemon look like a running
     // one whose sources all went quiet.
     let health = std::sync::Arc::new(fpai_collect::Health::new());
+    // Before `install`, so the first snapshot already carries delivery. The
+    // source map alone cannot say whether anything is ARRIVING — a source's job
+    // ends at the spool — and the SDK's batches have no source entry at all, so
+    // a machine shipping only SDK events reported an empty, healthy-looking file
+    // whether ingest was storing every event or discarding all of them.
+    health.attach_delivery(upload_metrics);
     fpai_collect::health::install(health.clone());
     let health_file = fpai_collect::health_path(&home);
     tasks.push(fpai_collect::TaskSpec::new("health", move |sd| {
@@ -1604,6 +1672,49 @@ fn install_signal_handler(shutdown: Arc<AtomicBool>) {
 
 #[cfg(test)]
 mod tests {
+    use super::{Invocation, parse_args};
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        std::iter::once("failproofaid".to_string())
+            .chain(rest.iter().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn bare_invocation_runs_the_daemon() {
+        assert_eq!(parse_args(&argv(&[])), Invocation::Run);
+    }
+
+    #[test]
+    fn version_flags_are_recognised() {
+        assert_eq!(parse_args(&argv(&["--version"])), Invocation::Version);
+        assert_eq!(parse_args(&argv(&["-v"])), Invocation::Version);
+    }
+
+    #[test]
+    fn help_flags_are_recognised() {
+        // The regression this file exists for: --help used to fall through to
+        // run(), so it started the daemon, took the lock and printed nothing.
+        assert_eq!(parse_args(&argv(&["--help"])), Invocation::Help);
+        assert_eq!(parse_args(&argv(&["-h"])), Invocation::Help);
+    }
+
+    #[test]
+    fn an_unknown_option_never_starts_the_daemon() {
+        assert_eq!(
+            parse_args(&argv(&["--collect"])),
+            Invocation::Unknown("--collect".to_string())
+        );
+    }
+
+    #[test]
+    fn help_wins_over_a_later_unknown_option() {
+        assert_eq!(
+            parse_args(&argv(&["--help", "--nonsense"])),
+            Invocation::Help
+        );
+    }
+
     use super::*;
 
     #[test]
