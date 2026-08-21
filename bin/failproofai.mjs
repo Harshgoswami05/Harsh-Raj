@@ -6,6 +6,7 @@
  *   --hook <event>        Hook event from Claude Code (minimal startup latency)
  *   --version / -v        Print version and exit
  *   --help / -h           Show usage and exit
+ *   --no-color            Suppress ANSI color output
  *   policies              Manage policies (list / install / uninstall)
  *   (default)             Launch production dashboard
  */
@@ -33,6 +34,15 @@ if (!process.env.FAILPROOFAI_DIST_PATH) {
 }
 
 const args = process.argv.slice(2);
+
+// Global presentation flag: consume it before subcommand validation so it can
+// appear before or after the command without becoming an unknown argument.
+if (args.includes("--no-color")) {
+  process.env.NO_COLOR = "1";
+  for (let i = args.length - 1; i >= 0; i--) {
+    if (args[i] === "--no-color") args.splice(i, 1);
+  }
+}
 
 // Normalize 'p' → 'policies' (shorthand alias)
 if (args[0] === "p") args[0] = "policies";
@@ -329,12 +339,6 @@ COMMANDS
 
   audit                          Audit your agent's behavior, then open the
                                  dashboard at http://localhost:8020/audit
-  audit --schedule [days]        Audit on a timer (default 7 days) and email you
-                                 what it finds. Signs you in the first time;
-                                 --email <address> skips that question
-  audit --no-schedule            Stop auditing on a timer
-  audit --status                 Whether scheduling is on, where reports go, and
-                                 when the next scan is due
   audit --help, -h               Show this help for the audit command
 
   backfill                       Re-send history the collector already read past
@@ -373,6 +377,7 @@ COMMANDS
 
   --version, -v                  Print version and exit
   --help, -h                     Show this help message
+  --no-color                     Suppress ANSI color output
 
 CONVENTION POLICIES
   Drop *policies.{js,mjs,ts} files into .failproofai/policies/ for auto-loading.
@@ -1145,6 +1150,9 @@ OPTIONS (install)
   --beta                         Include beta policies
   --custom, -c <path>            Custom policy file (repeat for multiple files)
                                  (skips interactive prompt; validates file first)
+
+OPTIONS (output)
+  --no-color                     Suppress ANSI color output
 
 OPTIONS (uninstall)
   [names...]                     Specific policy names to disable (omit to remove hooks)

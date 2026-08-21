@@ -68,6 +68,7 @@ describe("hooks/manager", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -1053,6 +1054,26 @@ describe("hooks/manager", () => {
   });
 
   describe("listHooks", () => {
+    it("honors NO_COLOR for every policy-list status", async () => {
+      vi.stubEnv("NO_COLOR", "1");
+      const { readMergedHooksConfig } = await import("../../src/hooks/hooks-config");
+      vi.mocked(readMergedHooksConfig).mockReturnValue({
+        enabledPolicies: ["block-sudo"],
+        policyParams: { "unknown-policy": { enabled: true } },
+        customPoliciesPath: "/tmp/missing-policy.js",
+      });
+      vi.mocked(existsSync).mockReturnValue(false);
+
+      const { listHooks } = await import("../../src/hooks/manager");
+      await listHooks();
+
+      const output = vi.mocked(console.log).mock.calls.map((call) => call[0]).join("\n");
+      expect(output).toContain("\u2713");
+      expect(output).toContain("unknown policyParams key");
+      expect(output).toContain("File not found");
+      expect(output).not.toMatch(/\x1B\[/);
+    });
+
     it("compact output when no hooks installed", async () => {
       const { readMergedHooksConfig } = await import("../../src/hooks/hooks-config");
       vi.mocked(readMergedHooksConfig).mockReturnValue({ enabledPolicies: [] });

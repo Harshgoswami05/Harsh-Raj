@@ -72,6 +72,10 @@
 
 ## 1.0.1-beta.0 — 2026-08-14
 
+### Fixes
+
+- Honor `NO_COLOR` and `--no-color` when listing policies (#695)
+
 ### Docs
 
 - Add an implementation-ready plan for a fresh FailproofAI documentation site centered on tracing agent runs, auditing failures, evaluating live quality, and deploying policies that prevent recurring failures.
